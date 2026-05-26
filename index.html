@@ -1,0 +1,1263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#05060a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Truck</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <style>
+    html, body, #root {
+      height: 100%; margin: 0;
+      background: #05060a; color: white;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.5; }
+    /* prevent flash before tailwind kicks in */
+    #root:empty::before {
+      content: "";
+      position: fixed; inset: 0;
+      background: radial-gradient(110% 70% at 50% -10%, #1a1438 0%, #0a0a1a 45%, #05060a 80%);
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+/* ============================== constants ============================== */
+
+const STORAGE_KEY = "truck-budget-v1";
+
+const CURRENCIES = {
+  USD: "$", EUR: "€", GBP: "£", JPY: "¥", PHP: "₱",
+  INR: "₹", KRW: "₩", CNY: "¥", AUD: "A$", CAD: "C$",
+  SGD: "S$", HKD: "HK$", THB: "฿", VND: "₫", IDR: "Rp", MYR: "RM"
+};
+
+const DEFAULT_CATEGORIES = [
+  { id: "cat-food",          name: "Food & Drinks",  emoji: "🍔", color: "#fb7185", type: "expense" },
+  { id: "cat-transport",     name: "Transport",      emoji: "🚗", color: "#60a5fa", type: "expense" },
+  { id: "cat-shopping",      name: "Shopping",       emoji: "🛍️", color: "#c084fc", type: "expense" },
+  { id: "cat-bills",         name: "Bills",          emoji: "📄", color: "#fbbf24", type: "expense" },
+  { id: "cat-entertainment", name: "Entertainment",  emoji: "🎬", color: "#f472b6", type: "expense" },
+  { id: "cat-health",        name: "Health",         emoji: "💊", color: "#34d399", type: "expense" },
+  { id: "cat-home",          name: "Home",           emoji: "🏠", color: "#a78bfa", type: "expense" },
+  { id: "cat-coffee",        name: "Coffee",         emoji: "☕", color: "#d97706", type: "expense" },
+  { id: "cat-other",         name: "Other",          emoji: "✨", color: "#94a3b8", type: "expense" },
+  { id: "cat-salary",        name: "Salary",         emoji: "💰", color: "#22d3ee", type: "income"  },
+  { id: "cat-side",          name: "Side Income",    emoji: "💼", color: "#10b981", type: "income"  },
+];
+
+const EMOJI_PICKS = ["🍔","🚗","🛍️","📄","🎬","💊","🏠","☕","✨","💰","💼","🎁","🎓","🐾","✈️","⛽","🍕","🍷","📱","💻","👕","💄","🏋️","📚","🎵","🎮","🚌","🚕","🏥","💡","🌐","🧾","🪴"];
+
+const DEFAULT_STATE = {
+  settings: { currency: "USD", name: "You", expectedIncome: 5000, periodStartDay: 1 },
+  categories: DEFAULT_CATEGORIES,
+  transactions: [],
+  recurring: [],
+};
+
+/* ============================== helpers ============================== */
+
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+function getPeriod(startDay, monthOffset = 0, now = new Date()) {
+  const d = new Date(now);
+  const safeStart = Math.min(Math.max(1, startDay), 28);
+  let start, end;
+  if (d.getDate() >= safeStart) {
+    start = new Date(d.getFullYear(), d.getMonth() + monthOffset, safeStart);
+    end   = new Date(d.getFullYear(), d.getMonth() + monthOffset + 1, safeStart);
+  } else {
+    start = new Date(d.getFullYear(), d.getMonth() + monthOffset - 1, safeStart);
+    end   = new Date(d.getFullYear(), d.getMonth() + monthOffset, safeStart);
+  }
+  return { start, end };
+}
+
+function projectRecurring(recurring, period) {
+  const occurrences = [];
+  for (const r of recurring) {
+    if (!r.active) continue;
+    let d = new Date(period.start);
+    while (d < period.end) {
+      if (d.getDate() === r.dayOfMonth) {
+        occurrences.push({
+          id: `rec-${r.id}-${d.toISOString().slice(0,10)}`,
+          recurringId: r.id, note: r.name, amount: r.amount,
+          categoryId: r.categoryId, date: d.toISOString(),
+          type: r.type, isRecurring: true,
+        });
+        break;
+      }
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  return occurrences;
+}
+
+function fmtMoney(n, currency = "USD") {
+  const sym = CURRENCIES[currency] || "";
+  const abs = Math.abs(n);
+  const formatted = abs.toLocaleString(undefined, {
+    minimumFractionDigits: abs < 10 ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
+  return (n < 0 ? "-" : "") + sym + formatted;
+}
+
+function relDay(d) {
+  const date = new Date(d);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const tgt = new Date(date); tgt.setHours(0,0,0,0);
+  const diff = Math.round((tgt - today) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff === -1) return "Yesterday";
+  if (diff > 1 && diff <= 7) return `in ${diff} days`;
+  if (diff < -1 && diff >= -7) return `${-diff} days ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function savingRateBand(rate) {
+  if (rate >= 20) return { label: "Excellent",  color: "#10b981", glow: "rgba(16,185,129,0.35)" };
+  if (rate >= 15) return { label: "Strong",     color: "#22d3ee", glow: "rgba(34,211,238,0.35)" };
+  if (rate >= 8)  return { label: "Building",   color: "#fbbf24", glow: "rgba(251,191,36,0.35)" };
+  return            { label: "Starting",   color: "#fb7185", glow: "rgba(251,113,133,0.35)" };
+}
+
+/* ============================== storage ============================== */
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const s = JSON.parse(raw);
+      return {
+        ...DEFAULT_STATE, ...s,
+        settings: { ...DEFAULT_STATE.settings, ...(s.settings || {}) },
+        categories: s.categories?.length ? s.categories : DEFAULT_CATEGORIES,
+        transactions: s.transactions || [],
+        recurring: s.recurring || [],
+      };
+    }
+  } catch (e) {}
+  return DEFAULT_STATE;
+}
+function saveState(state) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+  catch (e) { console.error("Save failed", e); }
+}
+
+/* ============================== icons ============================== */
+
+const ICON_PATHS = {
+  plus: ["M5 12h14", "M12 5v14"],
+  x: ["M18 6 6 18", "m6 6 12 12"],
+  chevronRight: ["m9 18 6-6-6-6"],
+  chevronLeft: ["m15 18-6-6 6-6"],
+  chevronDown: ["m6 9 6 6 6-6"],
+  repeat: ["m17 2 4 4-4 4", "M3 11v-1a4 4 0 0 1 4-4h14", "m7 22-4-4 4-4", "M21 13v1a4 4 0 0 1-4 4H3"],
+  download: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m7 10 5 5 5-5", "M12 15V3"],
+  upload: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m17 8-5-5-5 5", "M12 3v12"],
+  trash: ["M3 6h18", "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6", "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"],
+  trendingUp: ["m22 7-8.5 8.5-5-5L2 17", "M16 7h6v6"],
+  trendingDown: ["m22 17-8.5-8.5-5 5L2 7", "M16 17h6v-6"],
+  receipt: ["M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z", "M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8", "M12 17.5v-11"],
+  wallet: ["M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5", "M3 5v14a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2v-4"],
+  arrowUpRight: ["M7 7h10v10", "M7 17 17 7"],
+  arrowDownRight: ["m7 7 10 10", "M17 7v10H7"],
+  edit: ["M12 20h9", "M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"],
+  check: ["M20 6 9 17l-5-5"],
+  home: ["m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M9 22V12h6v10"],
+  barChart: ["M3 3v18h18", "M18 17V9", "M13 17V5", "M8 17v-3"],
+  sparkles: ["M12 3l1.74 4.83a2 2 0 0 0 1.43 1.43L20 11l-4.83 1.74a2 2 0 0 0-1.43 1.43L12 19l-1.74-4.83a2 2 0 0 0-1.43-1.43L4 11l4.83-1.74a2 2 0 0 0 1.43-1.43L12 3z", "M20 3v4", "M22 5h-4", "M4 17v2", "M5 18H3"],
+};
+
+function Icon({ name, size = 16, className = "", style = {}, strokeWidth = 2 }) {
+  const sp = {
+    width: size, height: size, viewBox: "0 0 24 24",
+    fill: "none", stroke: "currentColor", strokeWidth,
+    strokeLinecap: "round", strokeLinejoin: "round",
+    className, style,
+  };
+  if (name === "target") return (<svg {...sp}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>);
+  if (name === "search") return (<svg {...sp}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>);
+  if (name === "alertCircle") return (<svg {...sp}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>);
+  if (name === "calendarClock") return (<svg {...sp}><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><circle cx="16" cy="16" r="6"/><path d="m17.5 17.5-1.5-1.25V14"/></svg>);
+  if (name === "settings") return (<svg {...sp}><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>);
+  const paths = ICON_PATHS[name] || [];
+  return (<svg {...sp}>{paths.map((d, i) => <path key={i} d={d}/>)}</svg>);
+}
+
+/* ============================== charts ============================== */
+
+function MiniArea({ data, color }) {
+  if (!data.length) return null;
+  const max = Math.max(...data.map(d => d.value), 1);
+  const w = 300, h = 96;
+  const padX = 16, padTop = 8, padBottom = 18;
+  const innerH = h - padTop - padBottom;
+  const step = data.length > 1 ? (w - padX*2) / (data.length - 1) : 0;
+  const points = data.map((d, i) => [
+    padX + i * step,
+    padTop + innerH - (d.value / max) * innerH,
+  ]);
+  const line = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p[0]} ${p[1]}`).join(" ");
+  const area = `${line} L ${points[points.length-1][0]} ${padTop+innerH} L ${points[0][0]} ${padTop+innerH} Z`;
+  const id = `g-${color.replace("#","")}`;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.5"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${id})`}/>
+      <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      {data.map((d, i) => (
+        <text key={i} x={padX + i*step} y={h - 4} fill="rgba(255,255,255,0.35)" fontSize="10" textAnchor="middle">{d.label}</text>
+      ))}
+    </svg>
+  );
+}
+
+function MiniBar({ data }) {
+  if (!data.length) return null;
+  const max = Math.max(...data.map(d => d.value), 1);
+  const w = 300, h = 128;
+  const padX = 14, padTop = 8, padBottom = 18;
+  const innerH = h - padTop - padBottom;
+  const cellW = (w - padX*2) / data.length;
+  const barW = cellW * 0.62;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="none">
+      {data.map((d, i) => {
+        const x = padX + i * cellW + (cellW - barW)/2;
+        const barH = (d.value / max) * innerH;
+        return (
+          <g key={i}>
+            <rect
+              x={x} y={padTop + innerH - barH}
+              width={barW} height={Math.max(barH, 2)} rx="6"
+              fill={d.isCurrent ? "#22d3ee" : "rgba(255,255,255,0.18)"}
+            />
+            <text x={x + barW/2} y={h - 4} fill="rgba(255,255,255,0.4)" fontSize="10" textAnchor="middle">{d.label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function Donut({ segments, size = 128, thickness = 18 }) {
+  const total = segments.reduce((s, x) => s + x.value, 0);
+  if (total === 0) return null;
+  const cx = size/2, cy = size/2;
+  const r = size/2 - thickness/2 - 2;
+  // single segment → full ring
+  if (segments.length === 1) {
+    return (
+      <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-full">
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke={segments[0].color} strokeWidth={thickness}/>
+      </svg>
+    );
+  }
+  let angle = -Math.PI/2;
+  const gap = 0.02; // tiny gap between segments
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-full">
+      {segments.map((seg, i) => {
+        const sweep = (seg.value / total) * Math.PI * 2;
+        const start = angle + gap/2;
+        const end = angle + sweep - gap/2;
+        angle += sweep;
+        const x1 = cx + r * Math.cos(start);
+        const y1 = cy + r * Math.sin(start);
+        const x2 = cx + r * Math.cos(end);
+        const y2 = cy + r * Math.sin(end);
+        const largeArc = (end - start) > Math.PI ? 1 : 0;
+        return (
+          <path key={i}
+            d={`M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2}`}
+            fill="none" stroke={seg.color} strokeWidth={thickness} strokeLinecap="butt"/>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ============================== atoms ============================== */
+
+const Glass = ({ children, className = "", style = {}, onClick }) => (
+  <div onClick={onClick}
+    className={`relative rounded-3xl border border-white/10 bg-white/[0.04] backdrop-blur-2xl shadow-[0_8px_32px_rgba(0,0,0,0.35)] ${className}`}
+    style={{ backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.01) 40%, rgba(0,0,0,0.0) 100%)", ...style }}>
+    {children}
+  </div>
+);
+
+const PressableGlass = ({ children, className = "", onClick, style }) => (
+  <button onClick={onClick}
+    className={`relative rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-2xl shadow-[0_4px_18px_rgba(0,0,0,0.3)] active:scale-[0.97] transition-transform duration-150 ${className}`}
+    style={{ backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.01) 40%, rgba(0,0,0,0.0) 100%)", ...style }}>
+    {children}
+  </button>
+);
+
+const Pill = ({ children, color = "#94a3b8", glow }) => (
+  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border"
+    style={{ color, borderColor: color + "55", background: color + "18", boxShadow: glow ? `0 0 14px ${glow}` : undefined }}>
+    {children}
+  </span>
+);
+
+const BackgroundMesh = () => (
+  <div className="fixed inset-0 -z-10 overflow-hidden bg-[#05060a]">
+    <div className="absolute inset-0" style={{ background: "radial-gradient(110% 70% at 50% -10%, #1a1438 0%, #0a0a1a 45%, #05060a 80%)" }}/>
+    <div className="absolute -top-32 -left-20 h-[420px] w-[420px] rounded-full blur-3xl opacity-50" style={{ background: "radial-gradient(circle, #6d28d9 0%, transparent 60%)" }}/>
+    <div className="absolute top-40 -right-24 h-[460px] w-[460px] rounded-full blur-3xl opacity-40" style={{ background: "radial-gradient(circle, #0891b2 0%, transparent 60%)" }}/>
+    <div className="absolute bottom-0 left-10 h-[360px] w-[360px] rounded-full blur-3xl opacity-30" style={{ background: "radial-gradient(circle, #db2777 0%, transparent 60%)" }}/>
+  </div>
+);
+
+/* ============================== main app ============================== */
+
+function App() {
+  const [state, setState] = useState(loadState);
+  const [tab, setTab] = useState("home");
+  const [periodOffset, setPeriodOffset] = useState(0);
+  const [addOpen, setAddOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [recurringOpen, setRecurringOpen] = useState(false);
+  const [editTxn, setEditTxn] = useState(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => saveState(state), 200);
+    return () => clearTimeout(t);
+  }, [state]);
+
+  const { settings, categories, transactions, recurring } = state;
+  const catMap = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c])), [categories]);
+  const period = useMemo(() => getPeriod(settings.periodStartDay, periodOffset), [settings.periodStartDay, periodOffset]);
+
+  const periodTxns = useMemo(() => {
+    const manual = transactions.filter((t) => {
+      const d = new Date(t.date);
+      return d >= period.start && d < period.end;
+    });
+    const projected = projectRecurring(recurring, period).filter((p) =>
+      !transactions.some((t) => t.recurringId === p.recurringId &&
+        new Date(t.date).toDateString() === new Date(p.date).toDateString())
+    );
+    return [...manual, ...projected].sort((a,b) => new Date(b.date) - new Date(a.date));
+  }, [transactions, recurring, period]);
+
+  const today = new Date(); today.setHours(23,59,59,999);
+
+  const totals = useMemo(() => {
+    let actualExpense = 0, actualIncome = 0, plannedExpense = 0, plannedIncome = 0;
+    for (const t of periodTxns) {
+      const future = new Date(t.date) > today;
+      if (t.type === "expense") future ? plannedExpense += t.amount : actualExpense += t.amount;
+      else                     future ? plannedIncome  += t.amount : actualIncome  += t.amount;
+    }
+    const incomeBase = Math.max(settings.expectedIncome || 0, actualIncome + plannedIncome);
+    const leftToSpend = incomeBase - actualExpense - plannedExpense;
+    const savingRate = incomeBase > 0 ? ((incomeBase - actualExpense - plannedExpense) / incomeBase) * 100 : 0;
+    return { actualExpense, actualIncome, plannedExpense, plannedIncome,
+      totalExpense: actualExpense + plannedExpense, totalIncome: actualIncome + plannedIncome,
+      incomeBase, leftToSpend, savingRate };
+  }, [periodTxns, settings.expectedIncome]);
+
+  const upsertTxn = (t) => setState((s) => {
+    const exists = s.transactions.find((x) => x.id === t.id);
+    return { ...s, transactions: exists ? s.transactions.map((x) => x.id === t.id ? t : x) : [...s.transactions, t] };
+  });
+  const deleteTxn = (id) => setState((s) => ({ ...s, transactions: s.transactions.filter((t) => t.id !== id) }));
+  const materialiseRecurring = (planned) => {
+    const real = { id: uid(), amount: planned.amount, categoryId: planned.categoryId,
+      date: planned.date, note: planned.note, type: planned.type, recurringId: planned.recurringId };
+    upsertTxn(real);
+    return real;
+  };
+  const upsertRecurring = (r) => setState((s) => {
+    const exists = s.recurring.find((x) => x.id === r.id);
+    return { ...s, recurring: exists ? s.recurring.map((x) => x.id === r.id ? r : x) : [...s.recurring, r] };
+  });
+  const deleteRecurring = (id) => setState((s) => ({ ...s, recurring: s.recurring.filter((r) => r.id !== id) }));
+  const upsertCategory = (c) => setState((s) => {
+    const exists = s.categories.find((x) => x.id === c.id);
+    return { ...s, categories: exists ? s.categories.map((x) => x.id === c.id ? c : x) : [...s.categories, c] };
+  });
+  const deleteCategory = (id) => setState((s) => ({ ...s, categories: s.categories.filter((c) => c.id !== id) }));
+  const updateSettings = (patch) => setState((s) => ({ ...s, settings: { ...s.settings, ...patch } }));
+
+  const exportCSV = () => {
+    const rows = [["date","type","amount","category","note"]];
+    transactions.forEach((t) => {
+      const c = catMap[t.categoryId];
+      rows.push([new Date(t.date).toISOString(), t.type, t.amount.toString(),
+        c?.name || "", (t.note || "").replace(/"/g, '""')]);
+    });
+    const csv = rows.map((r) => r.map((v) => `"${v}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `truck-export-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  const importCSV = (file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const lines = e.target.result.split(/\r?\n/).filter(Boolean);
+        const header = lines.shift().split(",").map((h) => h.replace(/^"|"$/g, "").trim().toLowerCase());
+        const iDate = header.indexOf("date"), iType = header.indexOf("type"),
+              iAmt = header.indexOf("amount"), iCat = header.indexOf("category"), iNote = header.indexOf("note");
+        const newTxns = [];
+        for (const line of lines) {
+          const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g)?.map(s => s.replace(/^"|"$/g, "")) || [];
+          const catName = cols[iCat]?.trim();
+          let cat = categories.find((c) => c.name.toLowerCase() === catName?.toLowerCase());
+          const type = (cols[iType] || "expense").trim();
+          if (!cat) {
+            cat = { id: uid(), name: catName || "Imported", emoji: "📦", color: "#94a3b8", type };
+            upsertCategory(cat);
+          }
+          newTxns.push({ id: uid(), date: new Date(cols[iDate]).toISOString(), type,
+            amount: parseFloat(cols[iAmt]) || 0, categoryId: cat.id, note: cols[iNote] || "" });
+        }
+        setState((s) => ({ ...s, transactions: [...s.transactions, ...newTxns] }));
+      } catch (err) {
+        alert("Import failed. Make sure the CSV has columns: date, type, amount, category, note");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  return (
+    <div className="min-h-screen text-white">
+      <BackgroundMesh />
+      <div className="mx-auto max-w-[480px] px-4 pt-4 pb-32">
+        <Header settings={settings} period={period} periodOffset={periodOffset}
+          setPeriodOffset={setPeriodOffset} onOpenSettings={() => setSettingsOpen(true)}/>
+
+        {tab === "home" && (
+          <HomeScreen totals={totals} periodTxns={periodTxns} catMap={catMap} settings={settings}
+            onEditTxn={(t) => setEditTxn(t.isRecurring ? materialiseRecurring(t) : t)}
+            onOpenAll={() => setTab("transactions")}/>
+        )}
+        {tab === "transactions" && (
+          <TransactionsScreen periodTxns={periodTxns} catMap={catMap} settings={settings}
+            onEditTxn={(t) => setEditTxn(t.isRecurring ? materialiseRecurring(t) : t)}
+            onDeleteTxn={deleteTxn}/>
+        )}
+        {tab === "insights" && (
+          <InsightsScreen state={state} catMap={catMap} settings={settings} period={period} totals={totals}/>
+        )}
+        {tab === "planned" && (
+          <PlannedScreen periodTxns={periodTxns} recurring={recurring} catMap={catMap} settings={settings}
+            onOpenRecurring={() => setRecurringOpen(true)}
+            onDeleteRecurring={deleteRecurring}
+            onToggleRecurring={(r) => upsertRecurring({ ...r, active: !r.active })}/>
+        )}
+      </div>
+
+      <TabBar tab={tab} setTab={setTab} onAdd={() => setAddOpen(true)}/>
+
+      {addOpen && (
+        <AddSheet categories={categories} settings={settings}
+          onClose={() => setAddOpen(false)}
+          onSave={(t) => { upsertTxn(t); setAddOpen(false); }}/>
+      )}
+      {editTxn && (
+        <AddSheet initial={editTxn} categories={categories} settings={settings}
+          onClose={() => setEditTxn(null)}
+          onSave={(t) => { upsertTxn(t); setEditTxn(null); }}
+          onDelete={(id) => { deleteTxn(id); setEditTxn(null); }}/>
+      )}
+      {settingsOpen && (
+        <SettingsSheet settings={settings} categories={categories}
+          onClose={() => setSettingsOpen(false)} onUpdate={updateSettings}
+          onUpsertCategory={upsertCategory} onDeleteCategory={deleteCategory}
+          onExportCSV={exportCSV} onImportCSV={importCSV}
+          onReset={() => { if (confirm("Erase ALL data? This cannot be undone.")) setState(DEFAULT_STATE); }}/>
+      )}
+      {recurringOpen && (
+        <RecurringSheet categories={categories} settings={settings}
+          onClose={() => setRecurringOpen(false)}
+          onUpsert={upsertRecurring}/>
+      )}
+    </div>
+  );
+}
+
+/* ============================== header ============================== */
+
+function Header({ period, periodOffset, setPeriodOffset, onOpenSettings }) {
+  const isCurrent = periodOffset === 0;
+  const fmt = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return (
+    <div className="flex items-center justify-between mb-6 mt-2">
+      <div>
+        <div className="text-2xl font-bold uppercase tracking-[0.18em] bg-gradient-to-r from-cyan-300 via-white to-fuchsia-300 bg-clip-text text-transparent"
+             style={{ filter: "drop-shadow(0 0 12px rgba(34,211,238,0.25))" }}>Truck</div>
+        <div className="flex items-center gap-2 mt-1">
+          <button className="p-1 rounded-lg hover:bg-white/5 active:scale-95 transition" onClick={() => setPeriodOffset(periodOffset - 1)}>
+            <Icon name="chevronLeft" size={16} className="text-white/60"/>
+          </button>
+          <div className="text-sm font-medium tabular-nums">
+            {fmt(period.start)} – {fmt(new Date(period.end.getTime() - 86400000))}
+          </div>
+          <button className="p-1 rounded-lg hover:bg-white/5 active:scale-95 transition disabled:opacity-30" disabled={isCurrent} onClick={() => setPeriodOffset(periodOffset + 1)}>
+            <Icon name="chevronRight" size={16} className="text-white/60"/>
+          </button>
+        </div>
+      </div>
+      <button onClick={onOpenSettings} className="p-2.5 rounded-full bg-white/5 border border-white/10 backdrop-blur-xl active:scale-95 transition">
+        <Icon name="settings" size={18} className="text-white/80"/>
+      </button>
+    </div>
+  );
+}
+
+/* ============================== home ============================== */
+
+function HomeScreen({ totals, periodTxns, catMap, settings, onEditTxn, onOpenAll }) {
+  const band = savingRateBand(totals.savingRate);
+  const recent = periodTxns.slice(0, 6);
+  const spentPct = totals.incomeBase > 0 ? Math.min(100, (totals.actualExpense / totals.incomeBase) * 100) : 0;
+  const plannedPct = totals.incomeBase > 0 ? Math.min(100 - spentPct, (totals.plannedExpense / totals.incomeBase) * 100) : 0;
+
+  return (
+    <div className="space-y-4">
+      <Glass className="p-6 overflow-hidden">
+        <div className="absolute -top-20 -right-20 h-64 w-64 rounded-full blur-3xl opacity-40 pointer-events-none"
+             style={{ background: `radial-gradient(circle, ${band.color} 0%, transparent 70%)` }}/>
+        <div className="flex items-center gap-2 text-white/50 text-xs uppercase tracking-[0.18em] mb-2">
+          <Icon name="wallet" size={12}/> Left to spend
+        </div>
+        <div className="text-[56px] leading-none font-semibold tabular-nums tracking-tight" style={{ textShadow: `0 0 40px ${band.glow}` }}>
+          {fmtMoney(totals.leftToSpend, settings.currency)}
+        </div>
+        <div className="mt-3 text-xs text-white/50">
+          after all recurring bills • {Math.round(totals.savingRate)}% saving rate
+        </div>
+        <div className="relative h-2 mt-5 w-full rounded-full bg-white/[0.06] overflow-hidden">
+          <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${spentPct}%`, background: "linear-gradient(90deg,#f43f5e,#fb7185)" }}/>
+          <div className="absolute inset-y-0 rounded-full" style={{ left: `${spentPct}%`, width: `${plannedPct}%`, background: "linear-gradient(90deg,#fbbf24,#f59e0b)", opacity: 0.55 }}/>
+        </div>
+        <div className="grid grid-cols-3 gap-2 mt-5 text-[11px]">
+          <Stat label="Spent" value={fmtMoney(totals.actualExpense, settings.currency)} color="#fb7185"/>
+          <Stat label="Planned" value={fmtMoney(totals.plannedExpense, settings.currency)} color="#fbbf24"/>
+          <Stat label="Income" value={fmtMoney(totals.incomeBase, settings.currency)} color="#22d3ee"/>
+        </div>
+      </Glass>
+
+      <Glass className="p-4 flex items-center justify-between">
+        <div>
+          <div className="text-xs text-white/50 uppercase tracking-[0.16em]">Saving rate</div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <div className="text-2xl font-semibold tabular-nums">{totals.savingRate.toFixed(1)}%</div>
+            <Pill color={band.color} glow={band.glow}>{band.label}</Pill>
+          </div>
+        </div>
+        <Icon name="target" size={28} style={{ color: band.color, filter: `drop-shadow(0 0 14px ${band.glow})` }}/>
+      </Glass>
+
+      <div className="flex items-center justify-between mt-2 mb-2 px-1">
+        <div className="text-sm font-medium text-white/80">Recent</div>
+        <button onClick={onOpenAll} className="text-xs text-white/50 active:scale-95 transition flex items-center gap-1">
+          View all <Icon name="chevronRight" size={12}/>
+        </button>
+      </div>
+      {recent.length === 0 ? (
+        <Glass className="p-6 text-center text-white/40 text-sm">
+          No transactions yet. Tap <Icon name="plus" size={14} className="inline"/> to add your first.
+        </Glass>
+      ) : (
+        <Glass className="divide-y divide-white/5 overflow-hidden">
+          {recent.map((t) => (
+            <TxnRow key={t.id} txn={t} cat={catMap[t.categoryId]} currency={settings.currency} onClick={() => onEditTxn(t)}/>
+          ))}
+        </Glass>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, color }) {
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center gap-1 text-white/40 uppercase tracking-[0.12em]">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }}/>
+        {label}
+      </div>
+      <div className="mt-0.5 text-[13px] font-medium tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+function TxnRow({ txn, cat, currency, onClick }) {
+  const isExpense = txn.type === "expense";
+  const sign = isExpense ? "−" : "+";
+  const color = isExpense ? "text-rose-300" : "text-emerald-300";
+  return (
+    <button onClick={onClick} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.03] active:bg-white/[0.05] transition text-left">
+      <div className="h-10 w-10 rounded-2xl flex items-center justify-center text-lg" style={{ background: (cat?.color || "#94a3b8") + "22", border: `1px solid ${(cat?.color || "#94a3b8")}33` }}>
+        {cat?.emoji || "✨"}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[14px] font-medium truncate flex items-center gap-1.5">
+          {txn.note || cat?.name || "Transaction"}
+          {txn.isRecurring && <Icon name="repeat" size={11} className="text-white/30"/>}
+        </div>
+        <div className="text-[11px] text-white/40">{cat?.name} · {relDay(txn.date)}</div>
+      </div>
+      <div className={`text-[14px] font-semibold tabular-nums ${color}`}>
+        {sign}{fmtMoney(txn.amount, currency).replace("-", "")}
+      </div>
+    </button>
+  );
+}
+
+/* ============================== transactions ============================== */
+
+function TransactionsScreen({ periodTxns, catMap, settings, onEditTxn }) {
+  const [q, setQ] = useState("");
+  const [filter, setFilter] = useState("all");
+
+  const filtered = periodTxns.filter((t) => {
+    if (filter !== "all" && t.type !== filter) return false;
+    if (!q) return true;
+    const cat = catMap[t.categoryId];
+    return (t.note || "").toLowerCase().includes(q.toLowerCase()) ||
+           (cat?.name || "").toLowerCase().includes(q.toLowerCase());
+  });
+
+  const groups = useMemo(() => {
+    const m = new Map();
+    for (const t of filtered) {
+      const key = new Date(t.date).toDateString();
+      if (!m.has(key)) m.set(key, []);
+      m.get(key).push(t);
+    }
+    return [...m.entries()];
+  }, [filtered]);
+
+  return (
+    <div className="space-y-4">
+      <Glass className="p-2 flex items-center gap-2">
+        <Icon name="search" size={16} className="text-white/40 ml-2"/>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search transactions"
+          className="flex-1 bg-transparent outline-none text-sm placeholder:text-white/30 py-2"/>
+      </Glass>
+
+      <div className="flex gap-2">
+        {[{k:"all",label:"All"},{k:"expense",label:"Expenses"},{k:"income",label:"Income"}].map((f) => (
+          <button key={f.k} onClick={() => setFilter(f.k)}
+            className={`px-4 py-1.5 rounded-full text-xs border transition ${filter === f.k ? "bg-white/15 border-white/30 text-white" : "bg-white/[0.03] border-white/10 text-white/60"}`}>
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {groups.length === 0 ? (
+        <Glass className="p-8 text-center text-white/40 text-sm">No transactions match.</Glass>
+      ) : (
+        groups.map(([day, items]) => (
+          <div key={day}>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-white/40 px-2 mb-1.5">{relDay(day)}</div>
+            <Glass className="divide-y divide-white/5 overflow-hidden">
+              {items.map((t) => (
+                <TxnRow key={t.id} txn={t} cat={catMap[t.categoryId]} currency={settings.currency} onClick={() => onEditTxn(t)}/>
+              ))}
+            </Glass>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/* ============================== insights ============================== */
+
+function InsightsScreen({ state, catMap, settings, period, totals }) {
+  const byCat = useMemo(() => {
+    const m = new Map();
+    const periodTxns = state.transactions.filter((t) => {
+      const d = new Date(t.date);
+      return d >= period.start && d < period.end && t.type === "expense";
+    });
+    for (const t of periodTxns) m.set(t.categoryId, (m.get(t.categoryId) || 0) + t.amount);
+    return [...m.entries()].map(([cid, v]) => ({ cat: catMap[cid], value: v }))
+      .filter(x => x.cat).sort((a, b) => b.value - a.value);
+  }, [state.transactions, catMap, period]);
+
+  const trend = useMemo(() => {
+    const arr = [];
+    for (let i = -3; i <= 0; i++) {
+      const p = getPeriod(settings.periodStartDay, i);
+      const spent = state.transactions
+        .filter((t) => t.type === "expense" && new Date(t.date) >= p.start && new Date(t.date) < p.end)
+        .reduce((s, t) => s + t.amount, 0);
+      arr.push({ label: p.start.toLocaleDateString(undefined, { month: "short" }), value: spent, isCurrent: i === 0 });
+    }
+    return arr;
+  }, [state.transactions, settings.periodStartDay]);
+
+  const past3 = trend.slice(0, 3);
+  const avg3 = past3.reduce((s, x) => s + x.value, 0) / Math.max(1, past3.filter(x=>x.value>0).length || 1);
+  const current = trend[trend.length - 1].value;
+  const trendDelta = avg3 > 0 ? ((current - avg3) / avg3) * 100 : 0;
+  const trendUp = trendDelta > 0;
+  const band = savingRateBand(totals.savingRate);
+  const trendColor = trendUp ? "#fb7185" : "#34d399";
+
+  return (
+    <div className="space-y-4">
+      <Glass className="p-5">
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-[0.16em] text-white/50">Spending trend</div>
+            <div className="mt-2 text-3xl font-semibold tabular-nums">{fmtMoney(current, settings.currency)}</div>
+            <div className="mt-1 text-xs text-white/50 flex items-center gap-1.5">
+              <span className={`inline-flex items-center gap-0.5 ${trendUp ? "text-rose-300" : "text-emerald-300"}`}>
+                <Icon name={trendUp ? "arrowUpRight" : "arrowDownRight"} size={12}/>
+                {Math.abs(trendDelta).toFixed(0)}%
+              </span>
+              vs 3-month avg ({fmtMoney(avg3, settings.currency)})
+            </div>
+          </div>
+          <Icon name={trendUp ? "trendingUp" : "trendingDown"} size={24} className={trendUp ? "text-rose-300" : "text-emerald-300"}/>
+        </div>
+        <div className="h-24 mt-3 -mx-2">
+          <MiniArea data={trend} color={trendColor}/>
+        </div>
+      </Glass>
+
+      <Glass className="p-5">
+        <div className="text-xs uppercase tracking-[0.16em] text-white/50">Saving rate</div>
+        <div className="flex items-end justify-between mt-2">
+          <div className="text-4xl font-semibold tabular-nums" style={{ textShadow: `0 0 24px ${band.glow}` }}>
+            {totals.savingRate.toFixed(1)}%
+          </div>
+          <Pill color={band.color} glow={band.glow}>{band.label}</Pill>
+        </div>
+        <div className="relative h-2 mt-4 rounded-full bg-white/[0.06] overflow-hidden">
+          <div className="absolute inset-y-0 left-0 rounded-full transition-all"
+               style={{ width: `${Math.min(100, Math.max(0, totals.savingRate))}%`,
+                        background: `linear-gradient(90deg, ${band.color}, ${band.color}aa)`,
+                        boxShadow: `0 0 12px ${band.glow}` }}/>
+        </div>
+        <div className="grid grid-cols-4 mt-2 text-[10px] text-white/40">
+          <div>0%</div><div className="text-center">8%</div><div className="text-center">15%</div><div className="text-right">20%+</div>
+        </div>
+        <div className="mt-3 text-xs text-white/50 leading-relaxed">
+          0–8% Starting · 8–15% Building · 15–20% Strong · 20%+ Excellent
+        </div>
+      </Glass>
+
+      <Glass className="p-5">
+        <div className="text-xs uppercase tracking-[0.16em] text-white/50 mb-3">Top spending</div>
+        {byCat.length === 0 ? (
+          <div className="text-white/40 text-sm py-4 text-center">No expenses this period.</div>
+        ) : (
+          <div className="flex items-center gap-4">
+            <div className="h-32 w-32 shrink-0 relative">
+              <Donut segments={byCat.map(x => ({ value: x.value, color: x.cat.color }))} size={128} thickness={20}/>
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                <div className="text-[9px] uppercase tracking-wider text-white/40">Total</div>
+                <div className="text-[13px] font-semibold tabular-nums">
+                  {fmtMoney(byCat.reduce((s, x) => s + x.value, 0), settings.currency)}
+                </div>
+              </div>
+            </div>
+            <div className="flex-1 space-y-1.5">
+              {byCat.slice(0, 5).map((x) => (
+                <div key={x.cat.id} className="flex items-center gap-2 text-xs">
+                  <span className="h-2 w-2 rounded-full" style={{ background: x.cat.color }}/>
+                  <span className="text-white/70 flex-1 truncate">{x.cat.emoji} {x.cat.name}</span>
+                  <span className="tabular-nums text-white/90">{fmtMoney(x.value, settings.currency)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Glass>
+
+      <Glass className="p-5">
+        <div className="text-xs uppercase tracking-[0.16em] text-white/50 mb-3">Last 4 periods</div>
+        <div className="h-32"><MiniBar data={trend}/></div>
+      </Glass>
+    </div>
+  );
+}
+
+/* ============================== planned ============================== */
+
+function PlannedScreen({ periodTxns, recurring, catMap, settings, onOpenRecurring, onDeleteRecurring, onToggleRecurring }) {
+  const upcoming = periodTxns.filter((t) => new Date(t.date) > new Date()).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return (
+    <div className="space-y-4">
+      <Glass className="p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <div className="text-xs uppercase tracking-[0.16em] text-white/50">Upcoming this period</div>
+            <div className="text-2xl font-semibold tabular-nums mt-1">
+              {fmtMoney(upcoming.reduce((s, t) => s + (t.type === "expense" ? t.amount : 0), 0), settings.currency)}
+            </div>
+          </div>
+          <Icon name="calendarClock" size={24} className="text-cyan-300"/>
+        </div>
+
+        {upcoming.length === 0 ? (
+          <div className="text-white/40 text-sm py-6 text-center">Nothing upcoming. You're clear.</div>
+        ) : (
+          <div className="space-y-2">
+            {upcoming.map((t) => {
+              const cat = catMap[t.categoryId];
+              return (
+                <div key={t.id} className="flex items-center gap-3 py-1.5">
+                  <div className="h-9 w-9 rounded-xl flex items-center justify-center" style={{ background: (cat?.color || "#94a3b8") + "22", border: `1px solid ${(cat?.color || "#94a3b8")}33` }}>
+                    {cat?.emoji}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium truncate flex items-center gap-1.5">
+                      {t.note || cat?.name}
+                      {t.isRecurring && <Icon name="repeat" size={10} className="text-white/30"/>}
+                    </div>
+                    <div className="text-[11px] text-white/40">{relDay(t.date)}</div>
+                  </div>
+                  <div className={`text-sm tabular-nums ${t.type === "expense" ? "text-rose-300" : "text-emerald-300"}`}>
+                    {t.type === "expense" ? "−" : "+"}{fmtMoney(t.amount, settings.currency).replace("-","")}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Glass>
+
+      <div className="flex items-center justify-between px-1">
+        <div className="text-sm font-medium text-white/80 flex items-center gap-2">
+          <Icon name="repeat" size={14}/> Recurring
+        </div>
+        <PressableGlass className="px-3 py-1.5 text-xs" onClick={onOpenRecurring}>
+          <span className="flex items-center gap-1"><Icon name="plus" size={12}/> New</span>
+        </PressableGlass>
+      </div>
+
+      {recurring.length === 0 ? (
+        <Glass className="p-6 text-center text-white/40 text-sm">
+          No recurring bills yet. Add subscriptions, rent, salary and they'll auto-deduct each period.
+        </Glass>
+      ) : (
+        <Glass className="divide-y divide-white/5 overflow-hidden">
+          {recurring.map((r) => {
+            const cat = catMap[r.categoryId];
+            return (
+              <div key={r.id} className="flex items-center gap-3 px-4 py-3">
+                <div className="h-10 w-10 rounded-2xl flex items-center justify-center" style={{ background: (cat?.color || "#94a3b8") + "22", border: `1px solid ${(cat?.color || "#94a3b8")}33` }}>
+                  {cat?.emoji}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{r.name}</div>
+                  <div className="text-[11px] text-white/40">Day {r.dayOfMonth} · {cat?.name}</div>
+                </div>
+                <div className={`text-sm tabular-nums ${r.type === "expense" ? "text-rose-300" : "text-emerald-300"} ${!r.active ? "opacity-40" : ""}`}>
+                  {r.type === "expense" ? "−" : "+"}{fmtMoney(r.amount, settings.currency).replace("-","")}
+                </div>
+                <button className="ml-2 p-1.5 rounded-lg hover:bg-white/5 active:scale-95" onClick={() => onToggleRecurring(r)} title={r.active ? "Pause" : "Activate"}>
+                  {r.active ? <Icon name="check" size={14} className="text-emerald-300"/> : <Icon name="alertCircle" size={14} className="text-white/40"/>}
+                </button>
+                <button className="p-1.5 rounded-lg hover:bg-white/5 active:scale-95" onClick={() => onDeleteRecurring(r.id)} title="Delete">
+                  <Icon name="trash" size={14} className="text-white/40"/>
+                </button>
+              </div>
+            );
+          })}
+        </Glass>
+      )}
+    </div>
+  );
+}
+
+/* ============================== tab bar ============================== */
+
+function TabBar({ tab, setTab, onAdd }) {
+  const tabs = [
+    { k: "home",         icon: "home",          label: "Home" },
+    { k: "transactions", icon: "receipt",       label: "Log" },
+    { k: "insights",     icon: "barChart",      label: "Insights" },
+    { k: "planned",      icon: "calendarClock", label: "Planned" },
+  ];
+  return (
+    <div className="fixed bottom-4 left-0 right-0 mx-auto px-4 max-w-[480px] z-40">
+      <div className="relative">
+        <div className="flex items-center justify-around rounded-full border border-white/10 bg-white/[0.05] backdrop-blur-2xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] px-2 py-2"
+             style={{ backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.0) 60%)" }}>
+          {tabs.slice(0, 2).map((t) => (<TabBtn key={t.k} {...t} active={tab === t.k} onClick={() => setTab(t.k)}/>))}
+          <div className="w-12"/>
+          {tabs.slice(2).map((t) => (<TabBtn key={t.k} {...t} active={tab === t.k} onClick={() => setTab(t.k)}/>))}
+        </div>
+        <button onClick={onAdd} className="absolute left-1/2 -translate-x-1/2 -top-5 h-14 w-14 rounded-full active:scale-95 transition-all"
+          style={{ background: "linear-gradient(135deg, #22d3ee 0%, #6366f1 60%, #c026d3 100%)", boxShadow: "0 0 30px rgba(99,102,241,0.5), inset 0 0 12px rgba(255,255,255,0.2)" }}>
+          <Icon name="plus" size={26} className="mx-auto text-white drop-shadow"/>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TabBtn({ icon, label, active, onClick }) {
+  return (
+    <button onClick={onClick} className="flex flex-col items-center gap-0.5 px-3 py-1.5 transition active:scale-95">
+      <Icon name={icon} size={20} className={active ? "text-white" : "text-white/40"}/>
+      <div className={`text-[9px] uppercase tracking-wider ${active ? "text-white" : "text-white/40"}`}>{label}</div>
+    </button>
+  );
+}
+
+/* ============================== sheet ============================== */
+
+function Sheet({ title, onClose, children, footer }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm"/>
+      <div onClick={(e) => e.stopPropagation()}
+        className="relative w-full max-w-[480px] max-h-[90vh] overflow-y-auto rounded-t-[28px] border-t border-x border-white/10 bg-[#0b0c14]/90 backdrop-blur-2xl shadow-[0_-12px_60px_rgba(0,0,0,0.6)]"
+        style={{ backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(0,0,0,0) 100px)" }}>
+        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-4 backdrop-blur-2xl bg-[#0b0c14]/70 border-b border-white/5">
+          <div className="text-sm font-semibold">{title}</div>
+          <button onClick={onClose} className="p-1.5 rounded-full bg-white/5 active:scale-90 transition"><Icon name="x" size={16}/></button>
+        </div>
+        <div className="px-5 py-5">{children}</div>
+        {footer && <div className="sticky bottom-0 px-5 py-4 backdrop-blur-2xl bg-[#0b0c14]/80 border-t border-white/5">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ============================== add / edit txn ============================== */
+
+function AddSheet({ initial, categories, settings, onClose, onSave, onDelete }) {
+  const [type, setType] = useState(initial?.type || "expense");
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
+  const [categoryId, setCategoryId] = useState(initial?.categoryId || categories.find((c) => c.type === (initial?.type || "expense"))?.id);
+  const [note, setNote] = useState(initial?.note || "");
+  const [date, setDate] = useState(initial?.date ? new Date(initial.date).toISOString().slice(0,10) : new Date().toISOString().slice(0,10));
+
+  const filteredCats = categories.filter((c) => c.type === type);
+  useEffect(() => {
+    if (!filteredCats.find((c) => c.id === categoryId)) setCategoryId(filteredCats[0]?.id);
+  }, [type]);
+
+  const submit = () => {
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0 || !categoryId) return;
+    onSave({
+      id: initial?.id || uid(), type, amount: amt, categoryId,
+      note: note.trim(), date: new Date(date).toISOString(),
+      recurringId: initial?.recurringId,
+    });
+  };
+
+  return (
+    <Sheet title={initial ? "Edit transaction" : "New transaction"} onClose={onClose}
+      footer={
+        <div className="flex gap-2">
+          {initial && onDelete && (
+            <button onClick={() => onDelete(initial.id)} className="px-4 py-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-sm font-medium active:scale-95 transition">
+              <Icon name="trash" size={16}/>
+            </button>
+          )}
+          <button onClick={submit} disabled={!amount || !categoryId}
+            className="flex-1 py-3 rounded-2xl text-sm font-semibold text-white active:scale-95 transition disabled:opacity-40"
+            style={{ background: "linear-gradient(135deg, #22d3ee 0%, #6366f1 60%, #c026d3 100%)", boxShadow: "0 0 24px rgba(99,102,241,0.4)" }}>
+            {initial ? "Save changes" : "Add transaction"}
+          </button>
+        </div>
+      }>
+      <div className="grid grid-cols-2 gap-2 mb-5 p-1 rounded-2xl bg-white/[0.04] border border-white/10">
+        {["expense", "income"].map((t) => (
+          <button key={t} onClick={() => setType(t)}
+            className={`py-2.5 rounded-xl text-sm font-medium transition ${type === t ? "bg-white/15 text-white" : "text-white/50"}`}>
+            {t === "expense" ? "Expense" : "Income"}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex flex-col items-center mb-6">
+        <div className="text-xs text-white/40 uppercase tracking-wider mb-2">Amount</div>
+        <div className="flex items-baseline gap-1">
+          <span className="text-3xl text-white/40 font-light tabular-nums">{CURRENCIES[settings.currency]}</span>
+          <input type="text" inputMode="decimal" value={amount}
+            onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0"
+            className="bg-transparent outline-none text-5xl font-semibold tabular-nums text-center w-48"
+            style={{ caretColor: "#22d3ee" }}/>
+        </div>
+      </div>
+
+      <div className="text-[11px] uppercase tracking-[0.16em] text-white/40 mb-2">Category</div>
+      <div className="grid grid-cols-4 gap-2 mb-5">
+        {filteredCats.map((c) => (
+          <button key={c.id} onClick={() => setCategoryId(c.id)}
+            className={`flex flex-col items-center justify-center gap-1 py-3 rounded-2xl border transition active:scale-95 ${categoryId === c.id ? "border-white/30 bg-white/[0.08]" : "border-white/10 bg-white/[0.02]"}`}
+            style={categoryId === c.id ? { boxShadow: `inset 0 0 12px ${c.color}33, 0 0 14px ${c.color}33` } : {}}>
+            <div className="text-xl">{c.emoji}</div>
+            <div className="text-[10px] text-white/60 truncate w-full text-center px-1">{c.name}</div>
+          </button>
+        ))}
+      </div>
+
+      <div className="text-[11px] uppercase tracking-[0.16em] text-white/40 mb-2">Note</div>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional"
+        className="w-full bg-white/[0.04] border border-white/10 rounded-2xl px-4 py-3 text-sm placeholder:text-white/30 outline-none focus:border-white/30 mb-5"/>
+
+      <div className="text-[11px] uppercase tracking-[0.16em] text-white/40 mb-2">Date</div>
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+        className="w-full bg-white/[0.04] border border-white/10 rounded-2xl px-4 py-3 text-sm outline-none focus:border-white/30 [color-scheme:dark]"/>
+    </Sheet>
+  );
+}
+
+/* ============================== settings ============================== */
+
+function Field({ label, children }) {
+  return (
+    <div className="flex items-center justify-between bg-white/[0.04] border border-white/10 rounded-2xl px-4 py-3 text-sm">
+      <span className="text-white/60">{label}</span>
+      <div className="text-white">{children}</div>
+    </div>
+  );
+}
+
+function SettingsSheet({ settings, categories, onClose, onUpdate, onUpsertCategory, onDeleteCategory, onExportCSV, onImportCSV, onReset }) {
+  const [tab, setTab] = useState("general");
+  const fileRef = useRef(null);
+
+  return (
+    <Sheet title="Settings" onClose={onClose}>
+      <div className="grid grid-cols-3 gap-1 p-1 rounded-2xl bg-white/[0.04] border border-white/10 mb-5 text-xs">
+        {["general", "categories", "data"].map((t) => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`py-2 rounded-xl capitalize transition ${tab === t ? "bg-white/15 text-white" : "text-white/50"}`}>{t}</button>
+        ))}
+      </div>
+
+      {tab === "general" && (
+        <div className="space-y-4">
+          <Field label="Your name">
+            <input value={settings.name} onChange={(e) => onUpdate({ name: e.target.value })} className="bg-transparent outline-none w-full text-right"/>
+          </Field>
+          <Field label="Currency">
+            <select value={settings.currency} onChange={(e) => onUpdate({ currency: e.target.value })}
+              className="bg-transparent outline-none text-right [&>option]:bg-[#0b0c14]">
+              {Object.entries(CURRENCIES).map(([k, sym]) => (<option key={k} value={k}>{k} · {sym}</option>))}
+            </select>
+          </Field>
+          <Field label="Expected income">
+            <div className="flex items-center gap-1">
+              <span className="text-white/40">{CURRENCIES[settings.currency]}</span>
+              <input type="number" value={settings.expectedIncome}
+                onChange={(e) => onUpdate({ expectedIncome: parseFloat(e.target.value) || 0 })}
+                className="bg-transparent outline-none text-right tabular-nums w-32"/>
+            </div>
+          </Field>
+          <Field label="Period starts day">
+            <input type="number" min="1" max="28" value={settings.periodStartDay}
+              onChange={(e) => onUpdate({ periodStartDay: Math.min(28, Math.max(1, parseInt(e.target.value) || 1)) })}
+              className="bg-transparent outline-none text-right tabular-nums w-16"/>
+          </Field>
+          <div className="text-[11px] text-white/40 leading-relaxed mt-3 px-1">
+            Your budget cycle starts on this day each month. Set it to your payday.
+          </div>
+        </div>
+      )}
+
+      {tab === "categories" && (
+        <CategoryEditor categories={categories} onUpsert={onUpsertCategory} onDelete={onDeleteCategory}/>
+      )}
+
+      {tab === "data" && (
+        <div className="space-y-3">
+          <PressableGlass onClick={onExportCSV} className="w-full py-3 px-4 flex items-center gap-3 text-left">
+            <Icon name="download" size={16}/> <span className="text-sm">Export to CSV</span>
+          </PressableGlass>
+          <PressableGlass onClick={() => fileRef.current?.click()} className="w-full py-3 px-4 flex items-center gap-3 text-left">
+            <Icon name="upload" size={16}/> <span className="text-sm">Import from CSV</span>
+          </PressableGlass>
+          <input type="file" accept=".csv,text/csv" ref={fileRef} className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) onImportCSV(f); e.target.value = ""; }}/>
+          <div className="text-[11px] text-white/40 px-1">
+            Columns expected: date, type (expense|income), amount, category, note.
+          </div>
+          <button onClick={onReset}
+            className="w-full py-3 px-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm font-medium active:scale-95 transition mt-4 flex items-center justify-center gap-2">
+            <Icon name="trash" size={14}/> Erase all data
+          </button>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+function CategoryEditor({ categories, onUpsert, onDelete }) {
+  const [editing, setEditing] = useState(null);
+  const empty = { id: "", name: "", emoji: "✨", color: "#94a3b8", type: "expense" };
+
+  if (editing) {
+    return (
+      <div className="space-y-4">
+        <Field label="Name">
+          <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+            className="bg-transparent outline-none text-right w-40"/>
+        </Field>
+        <Field label="Type">
+          <select value={editing.type} onChange={(e) => setEditing({ ...editing, type: e.target.value })}
+            className="bg-transparent outline-none text-right [&>option]:bg-[#0b0c14]">
+            <option value="expense">Expense</option>
+            <option value="income">Income</option>
+          </select>
+        </Field>
+        <div className="text-[11px] uppercase tracking-[0.16em] text-white/40 px-1 mt-2 mb-1">Emoji</div>
+        <div className="grid grid-cols-8 gap-2 p-2 rounded-2xl bg-white/[0.03] border border-white/10">
+          {EMOJI_PICKS.map((e) => (
+            <button key={e} onClick={() => setEditing({ ...editing, emoji: e })}
+              className={`text-lg p-1.5 rounded-lg ${editing.emoji === e ? "bg-white/15" : ""}`}>{e}</button>
+          ))}
+        </div>
+        <div className="text-[11px] uppercase tracking-[0.16em] text-white/40 px-1 mt-3 mb-1">Color</div>
+        <div className="grid grid-cols-8 gap-2">
+          {["#fb7185","#f472b6","#c084fc","#a78bfa","#60a5fa","#22d3ee","#34d399","#fbbf24","#f97316","#94a3b8","#10b981","#ef4444","#3b82f6","#8b5cf6","#ec4899","#0891b2"].map((c) => (
+            <button key={c} onClick={() => setEditing({ ...editing, color: c })}
+              className={`h-8 rounded-xl border-2 ${editing.color === c ? "border-white" : "border-transparent"}`}
+              style={{ background: c }}/>
+          ))}
+        </div>
+        <div className="flex gap-2 pt-2">
+          <button onClick={() => setEditing(null)} className="flex-1 py-3 rounded-2xl bg-white/5 border border-white/10 text-sm">Cancel</button>
+          <button disabled={!editing.name}
+            onClick={() => { onUpsert({ ...editing, id: editing.id || uid() }); setEditing(null); }}
+            className="flex-1 py-3 rounded-2xl text-sm font-semibold text-white active:scale-95 transition disabled:opacity-40"
+            style={{ background: "linear-gradient(135deg, #22d3ee 0%, #6366f1 100%)" }}>Save</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <button onClick={() => setEditing(empty)}
+        className="w-full py-3 rounded-2xl border border-dashed border-white/15 text-sm text-white/60 active:scale-95 transition flex items-center justify-center gap-2">
+        <Icon name="plus" size={14}/> New category
+      </button>
+      {categories.map((c) => (
+        <div key={c.id} className="flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white/[0.03] border border-white/5">
+          <div className="h-9 w-9 rounded-xl flex items-center justify-center" style={{ background: c.color + "22", border: `1px solid ${c.color}33` }}>{c.emoji}</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm">{c.name}</div>
+            <div className="text-[10px] text-white/40 uppercase">{c.type}</div>
+          </div>
+          <button onClick={() => setEditing(c)} className="p-1.5 rounded-lg hover:bg-white/5"><Icon name="edit" size={14} className="text-white/50"/></button>
+          <button onClick={() => onDelete(c.id)} className="p-1.5 rounded-lg hover:bg-white/5"><Icon name="trash" size={14} className="text-white/40"/></button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============================== recurring ============================== */
+
+function RecurringSheet({ categories, settings, onClose, onUpsert }) {
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState("");
+  const [type, setType] = useState("expense");
+  const [categoryId, setCategoryId] = useState(categories.find((c) => c.type === "expense")?.id);
+  const [dayOfMonth, setDayOfMonth] = useState(1);
+
+  const filteredCats = categories.filter((c) => c.type === type);
+  useEffect(() => {
+    if (!filteredCats.find((c) => c.id === categoryId)) setCategoryId(filteredCats[0]?.id);
+  }, [type]);
+
+  const submit = () => {
+    if (!name || !amount || !categoryId) return;
+    onUpsert({
+      id: uid(), name: name.trim(), amount: parseFloat(amount), type, categoryId,
+      dayOfMonth: Math.min(28, Math.max(1, parseInt(dayOfMonth) || 1)),
+      active: true,
+    });
+    onClose();
+  };
+
+  return (
+    <Sheet title="New recurring" onClose={onClose}>
+      <div className="grid grid-cols-2 gap-2 mb-4 p-1 rounded-2xl bg-white/[0.04] border border-white/10">
+        {["expense","income"].map((t) => (
+          <button key={t} onClick={() => setType(t)}
+            className={`py-2.5 rounded-xl text-sm transition ${type===t ? "bg-white/15" : "text-white/50"}`}>
+            {t === "expense" ? "Bill" : "Income"}
+          </button>
+        ))}
+      </div>
+
+      <Field label="Name">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Rent, Netflix…"
+          className="bg-transparent outline-none text-right w-40 placeholder:text-white/30"/>
+      </Field>
+      <div className="mt-3"/>
+      <Field label="Amount">
+        <div className="flex items-center gap-1">
+          <span className="text-white/40">{CURRENCIES[settings.currency]}</span>
+          <input type="text" inputMode="decimal" value={amount}
+            onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
+            placeholder="0" className="bg-transparent outline-none text-right tabular-nums w-24 placeholder:text-white/30"/>
+        </div>
+      </Field>
+      <div className="mt-3"/>
+      <Field label="Day of month">
+        <input type="number" min="1" max="28" value={dayOfMonth}
+          onChange={(e) => setDayOfMonth(e.target.value)}
+          className="bg-transparent outline-none text-right tabular-nums w-16"/>
+      </Field>
+
+      <div className="text-[11px] uppercase tracking-[0.16em] text-white/40 px-1 mt-4 mb-2">Category</div>
+      <div className="grid grid-cols-4 gap-2 mb-5">
+        {filteredCats.map((c) => (
+          <button key={c.id} onClick={() => setCategoryId(c.id)}
+            className={`flex flex-col items-center gap-1 py-3 rounded-2xl border transition ${categoryId === c.id ? "border-white/30 bg-white/[0.08]" : "border-white/10 bg-white/[0.02]"}`}>
+            <div className="text-xl">{c.emoji}</div>
+            <div className="text-[10px] text-white/60 truncate w-full text-center px-1">{c.name}</div>
+          </button>
+        ))}
+      </div>
+
+      <button onClick={submit} disabled={!name || !amount || !categoryId}
+        className="w-full py-3 rounded-2xl text-sm font-semibold active:scale-95 transition disabled:opacity-40"
+        style={{ background: "linear-gradient(135deg, #22d3ee 0%, #6366f1 60%, #c026d3 100%)", boxShadow: "0 0 24px rgba(99,102,241,0.4)" }}>
+        Add recurring
+      </button>
+    </Sheet>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
